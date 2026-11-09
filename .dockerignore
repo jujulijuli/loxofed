@@ -1,0 +1,5 @@
+dev
+.git
+*.Rcheck
+*.tar.gz
+loxofed_demo

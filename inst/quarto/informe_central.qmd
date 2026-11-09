@@ -1,0 +1,674 @@
+---
+title: "LOXO · Meta-análisis federado de multimorbilidad y mortalidad"
+subtitle: "Red dinámica t0 → t1 y riesgo de muerte · efectos aleatorios REML + Hartung-Knapp · estructura consenso entre sitios"
+author: "Unidad de Metodología y Evaluación de Servicios Sanitarios · Navarrabiomed"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    toc-location: left
+    code-fold: true
+    df-print: paged
+    embed-resources: true
+    number-sections: true
+    fig-width: 9
+    theme: cosmo
+lang: es
+params:
+  central_dir: "."
+execute:
+  warning: false
+  message: false
+  cache: false
+---
+
+# Métodos
+
+## Marco federado
+
+Cada comunidad ejecuta **el mismo contenedor** sobre su tabla de personas y de enfermedades; **ningún dato individual sale del sitio**. El flujo tiene dos rondas y un paso central:
+
+1. **Ronda 1 (sitio).** Control de calidad, cohorte, aprendizaje de la estructura de la red (bootstrap de *hill-climbing*, BDe), prevalencias de las 60 condiciones y, para cada pareja de enfermedades, cuántas veces A precede a B, B a A, o empatan (por fecha exacta).
+2. **Consenso (central).** Se combinan las prevalencias (nodos con prevalencia agrupada ≥ 1 %), la fuerza de los arcos ponderada por el tamaño de cada sitio y la **dirección validada por la precedencia temporal** de los diagnósticos: *concordante*, *reorientada* o *incierta* (los inciertos no entran en el ajuste).
+3. **Ronda 2 (sitio).** Sobre la estructura consenso, cada sitio ajusta (a) la **incidencia** anual de cada enfermedad dadas sus enfermedades-padre, más edad (spline natural con nudos fijos comunes) y sexo, y (b) la **mortalidad** con **fechas exactas** (tiempo-persona, Poisson con *offset*, estado de enfermedad variable en el tiempo). Solo se envían **coeficientes y errores estándar** y tablas agregadas con celdas < 10 suprimidas.
+4. **Meta-análisis (central).** Se combinan los coeficientes de cada arco y de cada estado en la escala del modelo (log-OR, log-HR).
+
+Los sitios que trabajan con una **muestra aleatoria de personas** (`sample_n`) estiman sin ponderar —con pesos constantes los coeficientes no cambian y los errores estándar saldrían falsos—; sus errores estándar mayores hacen que pesen menos, sin sesgo. Los pesos de muestreo solo reescalan recuentos descriptivos.
+
+## Modelo de meta-análisis
+
+Para cada coeficiente se dispone de $k$ estimaciones $\hat\beta_i$ con error estándar $s_i$ ($i=1,\dots,k$ sitios). El modelo de efectos aleatorios es
+
+$$\hat\beta_i = \mu + u_i + \varepsilon_i,\qquad u_i\sim N(0,\tau^2),\quad \varepsilon_i\sim N(0,s_i^2),$$
+
+donde $\mu$ es el efecto medio entre sitios y $\tau^2$ la varianza *real* entre sitios (distinta codificación, cobertura, población).
+
+* **$\tau^2$ por REML**, con pesos $w_i=1/(s_i^2+\hat\tau^2)$ y $\hat\mu=\sum w_i\hat\beta_i/\sum w_i$.
+* **IC95 % de Hartung-Knapp:** $\hat\mu \pm t_{k-1,0.975}\,\widehat{\mathrm{se}}_{HK}$, con $\widehat{\mathrm{se}}_{HK}=\sqrt{\max(1,q)}\,/\sqrt{\sum w_i}$ y $q=\sum w_i(\hat\beta_i-\hat\mu)^2/(k-1)$ (versión truncada: nunca más estrecho que el IC normal).
+* **Intervalo de predicción:** $\hat\mu\pm t_{k-2,0.975}\sqrt{\hat\tau^2+\widehat{\mathrm{se}}_{HK}^2}$ (con $k\ge3$): dónde cabe esperar el efecto **en un sitio nuevo**.
+* **Heterogeneidad:** $\hat\tau^2$, $I^2=\hat\tau^2/(\hat\tau^2+\tilde s^2)$ (Higgins) y $Q$.
+* **Sensibilidad:** DerSimonian-Laird y **rango dejando un sitio fuera**.
+* **Mínimo de sitios:** con menos de `meta.min_sites` (3) no se da efecto combinado.
+
+**Por qué REML + Hartung-Knapp.** Con pocos sitios $\tau^2$ es muy incierto y los IC normales (DL o REML) quedan demasiado estrechos. En una simulación con $k=7$ sitios y 3.000 réplicas, la cobertura nominal del 95 % fue de ≈ 0,88–0,90 con IC normal y de ≈ 0,95 con Hartung-Knapp. El estimador se contrastó además con `metafor::rma(method="REML", test="adhoc")`: $\hat\tau^2$, $\hat\mu$ y el EE de Hartung-Knapp coinciden a ~$10^{-4}$ (la tolerancia de `metafor`). El intervalo de predicción usa $t_{k-2}$ (Higgins-Thompson-Spiegelhalter), no $t_{k-1}$.
+
+## Cómo leer los resultados
+
+* Un **OR/HR combinado** es el efecto medio entre sitios; si $I^2$ es alto, léelo **junto al intervalo de predicción**: el IC dice cuánta certeza hay sobre la media, la predicción dice cuánto varía de un sitio a otro.
+* La heterogeneidad puede ser **real** (poblaciones distintas) o **artefactual** (distinta codificación de las enfermedades o resolución de fechas). Los mapas de calor de la sección de heterogeneidad ayudan a separar un sitio atípico de una heterogeneidad generalizada.
+* Con $k$ pequeño, ni $\tau^2$ ni $I^2$ son precisos: son descriptivos.
+
+```{r setup}
+#| label: setup
+#| cache: false
+suppressPackageStartupMessages({
+  library(data.table); library(ggplot2); library(scales); library(igraph); library(knitr)
+  library(ggraph); library(tidygraph); library(patchwork); library(ggrepel)
+})
+has_vis <- requireNamespace("visNetwork", quietly = TRUE)
+has_dt  <- requireNamespace("DT", quietly = TRUE)
+theme_set(theme_minimal(base_size = 11) + theme(panel.grid.minor = element_blank(), legend.position = "bottom"))
+pal <- c(azul = "#1f6fb2", naranja = "#d9772b", verde = "#2e8b57", violeta = "#8a4fbf", gris = "#667585")
+
+cdir <- normalizePath(params$central_dir)
+rd <- function(...) { f <- file.path(cdir, ...); if (file.exists(f)) fread(f, na.strings = c("NA", "")) else NULL }
+mt <- rd("meta", "meta_coefs.csv"); sc <- rd("meta", "meta_site_coefs.csv"); si <- rd("meta", "meta_sites.csv")
+ob <- rd("meta", "meta_observed.csv"); pe <- rd("meta", "meta_period.csv"); dxs <- rd("meta", "meta_dx_by_year.csv"); cs <- rd("consensus", "consensus_structure.csv"); cn <- rd("consensus", "consensus_nodes.csv")
+pv <- rd("descriptive", "prevalence_by_site.csv"); eb <- rd("descriptive", "edges_by_site.csv")
+man <- tryCatch(jsonlite::read_json(file.path(cdir, "meta", "manifest.json")), error = function(e) list())
+
+# misma regla de etiquetas cortas que el informe de Navarra
+corto <- function(x) {
+  x <- gsub("_AND_.*|_EMPHYSEMA.*|_VISUAL.*|_AND_OTHER.*|_RELATED.*", "", x)
+  x <- gsub("CHRONIC_|_DISEASES?$|_DISEASE$", "", x)
+  x <- gsub("_", " ", x); x <- tools::toTitleCase(tolower(x)); sub("^Copd$", "COPD", x)
+}
+mt[, desde := ifelse(grepl("_t0$", termino), corto(sub("_t0$", "", termino)), NA_character_)]
+mt[, arco := ifelse(capa == "incidencia" & !is.na(desde), paste0(desde, " → ", corto(nodo)), NA_character_)]
+sc[, arco := ifelse(capa == "incidencia" & grepl("_t0$", termino), paste0(corto(sub("_t0$", "", termino)), " → ", corto(nodo)), NA_character_)]
+inc <- mt[capa == "incidencia" & !is.na(arco)]; inc_ok <- inc[status == "ok"]
+hz  <- mt[capa == "mortalidad" & nodo != "muerte"]; hz_ok <- hz[status == "ok"]
+nsite <- nrow(si); sites <- sort(si$site)
+cat(sprintf("%d sitios · %d coeficientes meta-analizados (%d con resultado combinado)\n", nsite, nrow(mt), sum(mt$status == "ok")))
+```
+
+# Sitios y comparabilidad
+
+Antes de combinar conviene comprobar que los sitios son **comparables**: tamaño, perfil de prevalencias y mortalidad observada.
+
+## Sitios participantes
+
+```{r sitios}
+t <- copy(si); for (cc in intersect(c("n_eligible", "n_cohort"), names(t))) t[[cc]] <- format(t[[cc]], big.mark = ".", decimal.mark = ",")
+kable(t, align = "lrrrrrl")
+```
+
+```{r aviso-version}
+#| results: asis
+if (!is.null(si$version) && length(unique(si$version)) > 1) cat("\n**Atención:** hay versiones distintas del paquete entre sitios.\n")
+if ("sample_weight" %in% names(si) && any(si$sample_weight > 1.0001, na.rm = TRUE))
+  cat("\nLos sitios con *peso de muestreo* > 1 trabajaron con una muestra aleatoria de personas.\n")
+```
+
+## Perfil de prevalencias por sitio
+
+```{r prev-heatmap}
+#| fig-height: 9
+if (!is.null(pv)) {
+  top <- cn[order(-prev)][seq_len(min(.N, 30)), node]
+  d <- pv[node %in% top & !is.na(n_pos)]; d[, lab := corto(node)]
+  d[, lab := factor(lab, levels = rev(corto(top)))]
+  ggplot(d, aes(site, lab, fill = prev)) + geom_tile(color = "white") +
+    geom_text(aes(label = sprintf("%.0f", 100 * prev)), size = 3, color = "grey15") +
+    scale_fill_gradient(low = "#f4f8fb", high = pal["azul"], labels = percent, name = "Prevalencia basal") +
+    labs(x = NULL, y = NULL, title = "Prevalencia basal (%) de las 30 condiciones más frecuentes",
+         subtitle = "Diferencias grandes entre columnas apuntan a distinta codificación o cobertura, no solo a salud") +
+    theme(panel.grid = element_blank())
+} else cat("Sin `descriptive/prevalence_by_site.csv`.")
+```
+
+```{r prev-cor}
+#| fig-height: 4.5
+if (!is.null(pv) && nsite >= 3) {
+  w <- dcast(pv[!is.na(n_pos)], node ~ site, value.var = "prev"); m <- as.matrix(w[, -1]); m <- m[rowSums(is.na(m)) == 0, , drop = FALSE]
+  cr <- cor(m, method = "spearman"); hc <- hclust(as.dist(1 - cr)); o <- hc$order
+  d <- as.data.table(as.table(cr[o, o])); setnames(d, c("a", "b", "r"))
+  ggplot(d, aes(a, b, fill = r)) + geom_tile(color = "white") + geom_text(aes(label = sprintf("%.2f", r)), size = 3) +
+    scale_fill_gradient2(low = pal["naranja"], mid = "white", high = pal["azul"], midpoint = 0.5, limits = c(min(0, min(d$r)), 1), name = "Spearman") +
+    labs(x = NULL, y = NULL, title = "Similitud entre sitios del perfil de prevalencias", subtitle = "Ordenado por agrupamiento jerárquico") +
+    coord_equal() + theme(panel.grid = element_blank())
+}
+```
+
+## Mortalidad observada por sitio
+
+```{r mort-obs}
+#| fig-height: 4.5
+if (!is.null(ob)) {
+  ob <- ob[!is.na(n_death)]
+  if ("person_years" %in% names(ob) && any(!is.na(ob$person_years))) {
+    g <- ob[, .(py = sum(person_years), d = sum(n_death)), by = .(site, Sexo, grupo_edad)][, tasa := 1000 * d / py]
+    ylab <- "muertes por 1.000 personas-año"
+  } else {
+    g <- ob[, .(py = sum(n_risk), d = sum(n_death)), by = .(site, Sexo, grupo_edad)][, tasa := 1000 * d / py]; ylab <- "muertes por 1.000 personas"
+  }
+  g[, grupo_edad := factor(grupo_edad, levels = c("<50", "50-59", "60-69", "70-79", "80-89", "90+"))]
+  ggplot(g[py > 0], aes(grupo_edad, tasa, group = site, color = site)) + geom_line(linewidth = .7) + geom_point(size = 1.4) +
+    facet_wrap(~Sexo) + scale_y_log10() + labs(x = "Grupo de edad", y = ylab, color = NULL,
+         title = "Mortalidad bruta observada, por sitio", subtitle = "Escala logarítmica; sin estandarizar; celdas suprimidas excluidas")
+} else cat("Sin `meta/meta_observed.csv`.")
+```
+
+## Calibración del modelo de mortalidad por sitio
+
+Cada sitio calcula, con su propio modelo de mortalidad, las muertes **esperadas** por celda (edad × sexo × año) y las devuelve junto con las observadas. El cociente **O/E** (con IC95 % de Poisson exacto) dice si el modelo reproduce la mortalidad de cada grupo de edad y de cada año. Por construcción el O/E global de cada sitio es 1; lo informativo es la **forma**: un O/E que cae con la edad o un pico en un año (p. ej. 2020) indican lo que el modelo no recoge (la edad como spline y la ausencia de tendencia temporal).
+
+```{r oe-edad}
+#| fig-height: 4.2
+if (!is.null(ob) && all(c("n_death", "n_exp") %in% names(ob)) && any(!is.na(ob$n_exp))) {
+  oe <- function(by) { o <- ob[!is.na(n_death) & !is.na(n_exp), .(O = sum(n_death), E = sum(n_exp)), by = by][E >= 5]
+    o[, `:=`(oe = O / E, lo = ifelse(O > 0, qchisq(.025, 2 * O) / 2, 0) / E, hi = qchisq(.975, 2 * (O + 1)) / 2 / E)]; o }
+  a <- oe(c("site", "grupo_edad")); a[, grupo_edad := factor(grupo_edad, levels = c("<50", "50-59", "60-69", "70-79", "80-89", "90+"))]
+  ggplot(a, aes(grupo_edad, oe, color = site, group = site)) + geom_hline(yintercept = 1, linetype = 2, color = "grey50") +
+    geom_pointrange(aes(ymin = lo, ymax = hi), position = position_dodge(.6), size = .35) +
+    coord_cartesian(ylim = c(0.5, 1.6)) + labs(x = "Grupo de edad", y = "observadas / esperadas", color = NULL, title = "Calibración por grupo de edad y sitio",
+         subtitle = "IC95 % de Poisson exacto; grupos con < 5 esperadas omitidos")
+} else cat("Los sitios no devolvieron muertes esperadas (`n_exp`); se necesita loxofed >= 0.6.0 en la ronda 2.")
+```
+
+```{r oe-anio}
+#| fig-height: 3.8
+if (exists("a")) {
+  y <- oe(c("site", "anio"))
+  ggplot(y, aes(anio, oe, color = site)) + geom_hline(yintercept = 1, linetype = 2, color = "grey50") +
+    geom_line(linewidth = .6) + geom_point(size = 1.2) + scale_x_continuous(breaks = scales::pretty_breaks()) +
+    labs(x = "Año", y = "observadas / esperadas", color = NULL, title = "Calibración por año natural y sitio",
+         subtitle = "Una desviación común a todos los sitios sugiere un efecto de periodo (p. ej. 2020); una propia de un sitio, un problema local")
+}
+```
+
+## Efecto calendario en la mortalidad
+
+El modelo de mortalidad de cada sitio incluye un **spline natural del año** (nudos fijos y comunes) y un **indicador de los años pandémicos**. La figura muestra la **tasa de mortalidad relativa por año** de cada sitio (a igual edad, sexo y enfermedades; referencia = primer año) y el HR del indicador pandémico por sitio y combinado. Con una cohorte cerrada, la tendencia suave no se puede separar del tiempo desde el inicio del seguimiento (selección de supervivientes, completitud del registro): es un **ajuste**, no un hallazgo; el indicador pandémico, al ser una desviación brusca, sí está mejor identificado.
+
+```{r calendario}
+#| fig-height: 4.2
+if (!is.null(pe) && nrow(pe)) {
+  pe[, rr := exp(log_rr_total)]
+  ggplot(pe, aes(anio, rr, color = site)) + geom_hline(yintercept = 1, linetype = 2, color = "grey50") +
+    geom_line(linewidth = .6) + geom_point(size = 1.2) + scale_x_continuous(breaks = scales::pretty_breaks()) +
+    labs(x = "Año", y = "tasa relativa al primer año", color = NULL, title = "Efecto calendario por sitio (tendencia + años pandémicos)",
+         subtitle = "Una subida o caída común a todos los sitios sugiere un efecto de periodo")
+} else cat("Los sitios no devolvieron `r2_period_effect.csv` (se necesita loxofed >= 0.7.0 y `model$calendar$enabled`).")
+```
+
+```{r pandemia}
+#| fig-height: 3.6
+if (!is.null(sc)) {
+  pp <- sc[capa == "mortalidad" & nodo == "muerte" & termino == "pandemia" & is.finite(beta)]
+  if (nrow(pp)) {
+    pp[, `:=`(hr = exp(beta), lo = exp(beta - 1.96 * se), hi = exp(beta + 1.96 * se))]
+    pm <- mt[capa == "mortalidad" & nodo == "muerte" & termino == "pandemia"]
+    d <- rbind(pp[, .(lab = site, hr, lo, hi, tipo = "sitio")],
+               if (nrow(pm) && is.finite(pm$exp_re[1])) pm[, .(lab = "COMBINADO", hr = exp_re, lo = lo, hi = hi, tipo = "combinado")])
+    d[, lab := factor(lab, levels = rev(c(sort(setdiff(lab, "COMBINADO")), intersect("COMBINADO", lab))))]
+    ggplot(d, aes(hr, lab, color = tipo)) + geom_vline(xintercept = 1, linetype = 2, color = "grey50") +
+      geom_pointrange(aes(xmin = lo, xmax = hi), size = .4) + scale_x_log10() +
+      scale_color_manual(values = c(sitio = pal[["gris"]], combinado = pal[["naranja"]]), guide = "none") +
+      labs(x = "HR de los años pandémicos (escala log)", y = NULL, title = "Exceso de mortalidad pandémica sobre la tendencia")
+  }
+}
+```
+
+## Registro diagnóstico durante la pandemia
+
+El efecto del periodo pandémico en la mortalidad convive con un **infrarregistro diagnóstico** descrito en la literatura (confinamiento, saturación asistencial, menor acceso a consulta). Cada sitio devuelve los **diagnósticos incidentes por enfermedad y año** (agregados, celdas < 10 suprimidas). Se comparan con los que cabía esperar según la **tendencia de los años previos** (Poisson con tendencia lineal, ajustado solo con los años anteriores a la pandemia y extrapolado). Cociente < 1 = menos diagnósticos de los esperados.
+
+```{r dx-total}
+#| fig-height: 3.8
+dxp <- NULL
+if (!is.null(dxs) && "pandemia" %in% names(dxs)) {
+  dxp <- rbindlist(lapply(split(dxs, dxs$site), function(d) { r <- loxofed::lox_dx_pandemic(d); if (!is.null(r)) r[, site := d$site[1]]; r }), fill = TRUE)
+}
+if (!is.null(dxp) && nrow(dxp[node == "TOTAL"])) {
+  tt <- dxp[node == "TOTAL"]; tt[, anio := factor(anio)]
+  ggplot(tt, aes(ratio, site, color = anio)) + geom_vline(xintercept = 1, linetype = 2, color = "grey50") +
+    geom_pointrange(aes(xmin = lo, xmax = hi), position = position_dodge(.5), size = .4) +
+    labs(x = "diagnósticos observados / esperados", y = NULL, color = NULL, title = "Diagnósticos incidentes en años pandémicos, por sitio (todas las enfermedades)",
+         subtitle = "IC95 %; esperados según la tendencia previa a la pandemia")
+} else cat("Los sitios no devolvieron `r2_dx_by_year.csv` (se necesita loxofed >= 0.7.1).")
+```
+
+```{r dx-heat}
+#| fig-height: 9
+if (!is.null(dxp) && nrow(dxp[node != "TOTAL"])) {
+  y0 <- min(dxp$anio); h <- dxp[node != "TOTAL" & anio == y0 & pmin(O, E) >= 30]
+  if (nrow(h)) {
+    h[, lab := corto(node)]; o <- h[, .(m = median(ratio)), by = lab][order(m)]$lab; h[, lab := factor(lab, levels = o)]
+    ggplot(h, aes(site, lab, fill = ratio)) + geom_tile(color = "white") + geom_text(aes(label = sprintf("%.2f", ratio)), size = 2.8) +
+      scale_fill_gradient2(low = pal["naranja"], mid = "white", high = pal["azul"], midpoint = 1, limits = c(.5, 1.5), oob = scales::squish, name = "obs/esp") +
+      labs(x = NULL, y = NULL, title = paste("Diagnósticos observados / esperados en", y0, "por enfermedad y sitio"),
+           subtitle = "Solo celdas con >= 30 diagnósticos observados y esperados; naranja = déficit de registro") + theme(panel.grid = element_blank())
+  }
+}
+```
+
+Un déficit común a todos los sitios apunta a un efecto de la pandemia sobre el registro; un déficit propio de un sitio, a un problema local de codificación o de cobertura. Esto contextualiza el **HR de los años pandémicos** de la sección anterior: si quienes murieron figuraban como *sin* enfermedad por falta de diagnóstico, ese indicador absorbe parte del efecto.
+
+# Estructura consenso
+
+```{r consenso-red}
+#| fig-height: 9
+#| results: asis
+if (!is.null(cs) && nrow(cs)) {
+  ok <- cs[state %in% c("concordante", "reorientada")]
+  cat(sprintf("**%d arcos causales** de %d candidatos (los *inciertos* no entran en el ajuste).\n", nrow(ok), nrow(cs)))
+  ed <- ok[, .(from = corto(dbn_from), to = corto(dbn_to), strength, state, frac_sites)]
+  g <- graph_from_data_frame(ed, directed = TRUE)
+  tg <- as_tbl_graph(g) %>% mutate(grado = centrality_degree(mode = "all"))
+  set.seed(1)
+  ggraph(tg, layout = "sugiyama") +
+    geom_edge_link(aes(width = strength, colour = state), arrow = arrow(length = unit(2.5, "mm"), type = "closed"),
+                   end_cap = circle(3, "mm"), alpha = .75) +
+    geom_node_point(aes(size = grado), colour = pal["azul"]) + geom_node_text(aes(label = name), repel = TRUE, size = 3) +
+    scale_edge_width(range = c(.4, 1.6), name = "Fuerza") +
+    scale_edge_colour_manual(values = c(concordante = pal[["gris"]], reorientada = pal[["naranja"]]), name = "Dirección") +
+    scale_size(range = c(2, 6), guide = "none") + theme_void() + theme(legend.position = "bottom")
+} else cat("Sin consenso.")
+```
+
+```{r consenso-red-vis}
+#| results: asis
+if (has_vis && !is.null(cs) && exists("ok") && nrow(ok)) {
+  nd <- data.frame(id = unique(c(ok$dbn_from, ok$dbn_to)))
+  nd$label <- corto(nd$id); nd$title <- nd$id
+  ed2 <- data.frame(from = ok$dbn_from, to = ok$dbn_to, width = 1 + 4 * ok$strength, arrows = "to",
+                    color = ifelse(ok$state == "reorientada", pal[["naranja"]], "#c9c9c9"),
+                    title = sprintf("%s → %s<br>fuerza %.2f · %s · %d%% precedencia", ok$dbn_from, ok$dbn_to, ok$strength, ok$state, ok$pct_dir_final))
+  cat("\n**Red interactiva** (arrastra los nodos; naranja = dirección reorientada por las fechas):\n\n")
+  print(htmltools::tagList(visNetwork::visNetwork(nd, ed2, height = "600px") |>
+    visNetwork::visIgraphLayout(layout = "layout_with_fr") |> visNetwork::visOptions(highlightNearest = TRUE)))
+}
+```
+
+## Acuerdo entre sitios sobre la estructura
+
+```{r acuerdo}
+#| fig-height: 7
+if (!is.null(eb) && !is.null(cs)) {
+  ok <- cs[state %in% c("concordante", "reorientada")]
+  d <- merge(eb, ok[, .(from = dbn_from, to = dbn_to)], by = c("from", "to"))
+  d[, arco := paste0(corto(from), " → ", corto(to))]
+  ordr <- d[, .(m = mean(strength)), by = arco][order(m), arco]; d[, arco := factor(arco, levels = ordr)]
+  ggplot(d, aes(site, arco, fill = strength)) + geom_tile(color = "white") + geom_text(aes(label = sprintf("%.2f", strength)), size = 2.7) +
+    scale_fill_gradient(low = "#f4f8fb", high = pal["azul"], limits = c(0, 1), name = "Fuerza local (bootstrap)") +
+    labs(x = NULL, y = NULL, title = "Fuerza de cada arco del consenso, por sitio",
+         subtitle = "Un arco con fuerza alta en todos los sitios es una estructura compartida; con 0 en alguno, puede deberse a que el nodo no se ajustó allí") +
+    theme(panel.grid = element_blank())
+}
+```
+
+```{r tabla-consenso}
+if (!is.null(cs)) {
+  tb <- cs[order(-frac_sites, -strength)][, .(Desde = corto(dbn_from), Hasta = corto(dbn_to), Fuerza = round(strength, 2), Estado = state,
+                                            `% precedencia` = pct_dir_final, Sitios = n_sites, `Fracción` = round(frac_sites, 2))]
+  if (has_dt) DT::datatable(tb, rownames = FALSE, options = list(pageLength = 15)) else kable(tb)
+}
+```
+
+
+## Centralidad: disparadores y receptores
+
+Sobre la estructura consenso se calcula, para cada enfermedad, cuánto *dispara* a otras (arcos que salen) y cuánto *recibe* (arcos que entran). La **centralidad armónica** tiene en cuenta también las conexiones indirectas (cuanto más alta, más cerca está la enfermedad del resto de la red) y la **intermediación** mide cuántos caminos entre otras enfermedades pasan por ella (enfermedades «puente»). Se calcula en el centro con la red consenso; no hace falta ningún dato de los sitios.
+
+```{r centralidad}
+#| fig-height: 6
+if (!is.null(cs) && exists("ok") && nrow(ok)) {
+  met <- loxofed::lox_network_metrics(data.frame(from = ok$dbn_from, to = ok$dbn_to, strength = ok$strength))
+  met[, enfermedad := corto(node)]
+  met[, rol := fifelse(out_strength > in_strength, "disparador", fifelse(in_strength > out_strength, "receptor", "mixto"))]
+  ggplot(met, aes(in_strength, out_strength, size = betweenness + 1, colour = rol)) + geom_abline(linetype = 2, colour = "grey70") +
+    geom_point(alpha = .8) + geom_text_repel(aes(label = enfermedad), size = 3, show.legend = FALSE, max.overlaps = 30) +
+    scale_colour_manual(values = c(disparador = pal[["naranja"]], receptor = pal[["azul"]], mixto = pal[["gris"]]), name = NULL) +
+    scale_size(range = c(2, 7), guide = "none") +
+    labs(x = "Fuerza entrante (recibe)", y = "Fuerza saliente (dispara)",
+         title = "Disparadores y receptores de multimorbilidad", subtitle = "Sobre la diagonal, la enfermedad dispara más de lo que recibe; el tamaño es la intermediación")
+}
+```
+
+```{r centralidad-tabla}
+if (exists("met")) {
+  tb <- met[order(-out_strength, -harmonic_out)][, .(Enfermedad = enfermedad, `Rol` = rol, `Arcos que salen` = out_degree, `Arcos que entran` = in_degree,
+        `Fuerza saliente` = round(out_strength, 2), `Fuerza entrante` = round(in_strength, 2), `Armónica (sale)` = round(harmonic_out, 3), `Armónica (entra)` = round(harmonic_in, 3), `Intermediación` = round(betweenness, 1))]
+  if (has_dt) DT::datatable(tb, rownames = FALSE, options = list(pageLength = 15)) else kable(tb)
+}
+```
+
+## Comunidades de enfermedades (patrones)
+
+Con el algoritmo de Louvain y el de Leiden se buscan **grupos de enfermedades más conectadas entre sí que con el resto** (maximizando la modularidad), tratando la red como no dirigida y ponderada por la fuerza. El **parámetro de resolución** controla el tamaño: más alto, más comunidades más pequeñas. La estabilidad frente a ese parámetro indica hasta qué punto la partición es robusta; el nombre clínico de cada patrón queda para la interpretación.
+
+```{r comunidades}
+#| fig-height: 7
+#| results: asis
+if (exists("ok") && nrow(ok) && requireNamespace("igraph", quietly = TRUE)) {
+  E <- data.frame(from = ok$dbn_from, to = ok$dbn_to, strength = ok$strength)
+  res <- rbindlist(lapply(c(0.5, 0.75, 1, 1.5), function(r) rbindlist(lapply(c("louvain", "leiden"), function(m) {
+    cm <- tryCatch(loxofed::lox_communities(E, m, r), error = function(e) NULL)
+    if (is.null(cm)) NULL else data.table(metodo = m, resolucion = r, comunidades = uniqueN(cm$community), modularidad = round(cm$modularity[1], 3))
+  }))))
+  if (nrow(res)) cat("\n\n"); print(kable(res, format = "html", caption = "Comunidades según método y resolución")); cat("\n\n")
+  cm <- loxofed::lox_communities(E, "louvain", 1)
+  if (!is.null(cm)) {
+    cm[, enfermedad := corto(node)]
+    g2 <- graph_from_data_frame(data.frame(from = corto(ok$dbn_from), to = corto(ok$dbn_to), strength = ok$strength), directed = TRUE)
+    tg2 <- as_tbl_graph(g2) %>% mutate(comunidad = factor(cm$community[match(name, cm$enfermedad)]))
+    set.seed(1)
+    print(ggraph(tg2, layout = "stress") + geom_edge_link(aes(width = strength), alpha = .5, colour = "grey60",
+            arrow = arrow(length = unit(2.2, "mm"), type = "closed"), end_cap = circle(3, "mm")) +
+      geom_node_point(aes(colour = comunidad), size = 5) + geom_node_text(aes(label = name), repel = TRUE, size = 3) +
+      scale_edge_width(range = c(.4, 1.6), guide = "none") + theme_void() + theme(legend.position = "bottom") +
+      labs(title = "Comunidades de la estructura consenso (Louvain, resolución 1)"))
+    cat("\n\n"); print(kable(cm[order(community, enfermedad), .(Comunidad = community, Enfermedades = paste(enfermedad, collapse = ", ")), by = community][, .(Comunidad = community, Enfermedades)], format = "html")); cat("\n\n")
+  }
+} else cat("Se necesita el paquete igraph para las comunidades.")
+```
+
+### ¿Coinciden los sitios en las comunidades?
+
+Se calculan las comunidades de la red *propia* de cada sitio (arcos con fuerza local ≥ 0,6) y se comparan con el índice de Rand ajustado (1 = misma partición; 0 = como al azar) sobre las enfermedades que aparecen en ambas.
+
+```{r comunidades-sitios}
+#| fig-height: 5
+if (!is.null(eb) && requireNamespace("igraph", quietly = TRUE)) {
+  thr <- 0.6; sl <- lapply(sort(unique(eb$site)), function(s) {
+    e <- eb[site == s & strength >= thr]; if (nrow(e) < 3) return(NULL)
+    loxofed::lox_communities(data.frame(from = e$from, to = e$to, strength = e$strength), "louvain", 1) })
+  names(sl) <- sort(unique(eb$site)); sl <- Filter(Negate(is.null), sl)
+  if (length(sl) >= 2) {
+    ss <- names(sl); A <- outer(ss, ss, Vectorize(function(a, b) { m <- merge(sl[[a]], sl[[b]], by = "node")
+      if (nrow(m) < 4) NA_real_ else loxofed:::.lox_ari(m$community.x, m$community.y) }))
+    dd <- as.data.table(as.table(`dimnames<-`(A, list(a = ss, b = ss))))
+    ggplot(dd, aes(a, b, fill = N)) + geom_tile(colour = "white") + geom_text(aes(label = ifelse(is.na(N), "", sprintf("%.2f", N))), size = 3) +
+      scale_fill_gradient(low = "#f4f8fb", high = pal["azul"], limits = c(0, 1), na.value = "grey90", name = "Rand ajustado") +
+      labs(x = NULL, y = NULL, title = "Acuerdo entre sitios en la partición de enfermedades") + theme(panel.grid = element_blank())
+  } else cat("Se necesitan al menos dos sitios con red propia.")
+}
+```
+
+# Mortalidad: efecto de cada enfermedad
+
+Cociente de tasas (HR) ajustado por edad y sexo, con el estado de cada enfermedad **variable en el tiempo** (fechas exactas de diagnóstico y de muerte).
+
+## HR combinados
+
+```{r hr-forest}
+#| fig-height: 9
+if (nrow(hz_ok)) {
+  d <- hz_ok[order(exp_re)]; d[, est := factor(corto(nodo), levels = corto(nodo))]
+  d[, sig := fifelse(lo > 1, "IC > 1", fifelse(hi < 1, "IC < 1", "incluye 1"))]
+  ggplot(d, aes(y = est)) +
+    geom_linerange(aes(xmin = pi_lo, xmax = pi_hi), color = pal["naranja"], linewidth = 1.6, alpha = .35, na.rm = TRUE) +
+    geom_linerange(aes(xmin = lo, xmax = hi), color = "grey30") + geom_point(aes(x = exp_re, color = sig), size = 2.6) +
+    geom_vline(xintercept = 1, linetype = 2) + scale_x_log10(breaks = c(.5, .75, 1, 1.5, 2, 3)) +
+    scale_color_manual(values = c("IC > 1" = pal[["naranja"]], "IC < 1" = pal[["azul"]], "incluye 1" = pal[["gris"]]), name = NULL) +
+    labs(x = "HR combinado (escala log)", y = NULL, title = "HR de mortalidad por enfermedad",
+         subtitle = "Punto: efecto combinado · línea fina: IC95% Hartung-Knapp · banda ancha: intervalo de predicción (sitio nuevo)")
+} else cat("Sin estados con k suficiente.")
+```
+
+## HR por sitio
+
+```{r hr-heatmap}
+#| fig-height: 9
+if (nrow(hz_ok)) {
+  s <- sc[capa == "mortalidad" & nodo != "muerte" & is.finite(beta)]
+  s[, est := corto(nodo)]; pool <- hz_ok[, .(est = corto(nodo), site = "COMBINADO", beta = beta_re)]
+  d <- rbind(s[, .(est, site, beta)], pool); d[, est := factor(est, levels = corto(hz_ok[order(exp_re), nodo]))]
+  d[, site := factor(site, levels = c(sites, "COMBINADO"))]
+  lim <- max(abs(d$beta), na.rm = TRUE)
+  ggplot(d, aes(site, est, fill = beta)) + geom_tile(color = "white") + geom_text(aes(label = sprintf("%.2f", exp(beta))), size = 2.8) +
+    scale_fill_gradient2(low = pal["azul"], mid = "white", high = pal["naranja"], limits = c(-lim, lim), name = "log HR") +
+    labs(x = NULL, y = NULL, title = "HR de mortalidad por sitio", subtitle = "Una columna que se separa del resto sugiere un sitio atípico") +
+    theme(panel.grid = element_blank())
+}
+```
+
+```{r hr-tabla}
+if (nrow(hz)) {
+  tb <- hz[order(-exp_re)][, .(Estado = corto(nodo), k, Meta = status, HR = round(exp_re, 2), lo = round(lo, 2), hi = round(hi, 2),
+           pi_lo = round(pi_lo, 2), pi_hi = round(pi_hi, 2), tau2 = round(tau2, 3), I2 = round(100 * I2), `p (HK)` = signif(p, 2))]
+  if (has_dt) DT::datatable(tb, rownames = FALSE, options = list(pageLength = 15)) else kable(tb)
+}
+```
+
+
+## ¿Difiere el efecto entre hombres y mujeres?
+
+Cada sitio ajusta el modelo de mortalidad por separado en hombres y en mujeres. El **cociente de HR (hombres / mujeres)** de cada enfermedad se combina entre sitios (escala logarítmica, REML + Hartung-Knapp). Si el intervalo no incluye 1, el peso de esa enfermedad sobre la mortalidad difiere entre sexos.
+
+```{r sexo-mortalidad}
+#| fig-height: 8
+msx <- rd("meta", "meta_sex.csv")
+if (!is.null(msx) && nrow(msx[capa == "mortalidad_dif_sexo" & status == "ok"])) {
+  d <- msx[capa == "mortalidad_dif_sexo" & status == "ok"][order(exp_re)]
+  d[, enf := factor(corto(nodo), levels = corto(nodo))]
+  ggplot(d, aes(exp_re, enf)) + geom_vline(xintercept = 1, linetype = 2) +
+    geom_errorbarh(aes(xmin = lo, xmax = hi), height = .25, colour = pal["gris"]) + geom_point(size = 2, colour = pal["azul"]) +
+    scale_x_log10() + labs(x = "Cociente de HR (hombres / mujeres), escala logarítmica", y = NULL,
+      title = "Efecto de cada enfermedad sobre la mortalidad: hombres frente a mujeres",
+      subtitle = ">1: el efecto relativo es mayor en hombres; <1, en mujeres")
+} else cat("Sin resultados combinados por sexo (faltan sitios o `r2_hr_por_sexo.csv`).")
+```
+
+# Incidencia: efecto de las enfermedades previas
+
+Odds ratio de que una enfermedad (*Hasta*) aparezca en el año siguiente si la persona ya tiene la enfermedad *Desde*, ajustado por edad y sexo y por las demás enfermedades-padre de la estructura consenso.
+
+## OR combinados
+
+```{r or-caterpillar}
+#| fig-height: 9
+if (nrow(inc_ok)) {
+  d <- inc_ok[order(exp_re)]; d[, arco := factor(arco, levels = arco)]
+  d[, het := cut(100 * I2, c(-1, 25, 50, 75, 101), labels = c("I² < 25%", "25–50%", "50–75%", "≥ 75%"))]
+  ggplot(d, aes(y = arco)) +
+    geom_linerange(aes(xmin = pi_lo, xmax = pi_hi), color = pal["naranja"], linewidth = 1.6, alpha = .35, na.rm = TRUE) +
+    geom_linerange(aes(xmin = lo, xmax = hi), color = "grey30") + geom_point(aes(x = exp_re, color = het), size = 2.6) +
+    geom_vline(xintercept = 1, linetype = 2) + scale_x_log10(breaks = c(.5, 1, 2, 4, 8, 16)) +
+    scale_color_brewer(palette = "YlOrRd", name = "Heterogeneidad") +
+    labs(x = "OR combinado (escala log)", y = NULL, title = "OR de incidencia por arco",
+         subtitle = "Punto: efecto combinado · línea fina: IC95% Hartung-Knapp · banda ancha: intervalo de predicción")
+} else cat("Sin arcos con k suficiente.")
+```
+
+```{r or-tabla}
+if (nrow(inc)) {
+  tb <- inc[order(-exp_re)][, .(Arco = arco, k, Meta = status, OR = round(exp_re, 2), lo = round(lo, 2), hi = round(hi, 2),
+           pi_lo = round(pi_lo, 2), pi_hi = round(pi_hi, 2), tau2 = round(tau2, 3), I2 = round(100 * I2), `p (HK)` = signif(p, 2))]
+  if (has_dt) DT::datatable(tb, rownames = FALSE, options = list(pageLength = 15)) else kable(tb)
+}
+```
+
+## Diagramas de bosque por arco
+
+Un panel por arco: cada punto es un sitio (IC95 % normal); el diamante, el efecto combinado con su IC de Hartung-Knapp. Paneles ordenados de más a menos heterogéneo.
+
+```{r forest-arcos}
+#| fig-height: !expr max(5, 2.1 * ceiling(nrow(inc_ok) / 3))
+if (nrow(inc_ok)) {
+  ord <- inc_ok[order(-I2), arco]
+  s <- sc[arco %in% ord & is.finite(beta) & se > 0, .(arco, site, est = beta, lo = beta - 1.96 * se, hi = beta + 1.96 * se, tipo = "sitio")]
+  p <- inc_ok[, .(arco, site = "COMBINADO", est = beta_re, lo = log(lo), hi = log(hi), tipo = "combinado")]
+  d <- rbind(s, p); d[, arco := factor(arco, levels = ord)]; d[, site := factor(site, levels = rev(c(sites, "COMBINADO")))]
+  ggplot(d, aes(exp(est), site, color = tipo, shape = tipo)) + geom_linerange(aes(xmin = exp(lo), xmax = exp(hi))) + geom_point(size = 2) +
+    geom_vline(xintercept = 1, linetype = 2, color = "grey50") + scale_x_log10() +
+    scale_color_manual(values = c(sitio = pal[["gris"]], combinado = pal[["naranja"]]), guide = "none") +
+    scale_shape_manual(values = c(sitio = 15, combinado = 18), guide = "none") +
+    facet_wrap(~arco, scales = "free_x", ncol = 3) + labs(x = "OR (escala log)", y = NULL) + theme(strip.text = element_text(size = 8))
+}
+```
+
+
+## Edad y sexo sobre la incidencia
+
+Para cada enfermedad: el efecto de **pasar de 70 a 80 años** (contraste de la curva de edad) y el del **sexo masculino frente al femenino**, ajustados por las enfermedades previas del consenso. Errores estándar robustos por persona.
+
+```{r edad-sexo-incidencia}
+#| fig-height: 8
+ed <- mt[capa == "incidencia" & termino %in% c("edad_70a80", "SexoHombre") & status == "ok"]
+if (nrow(ed)) {
+  ed[, efecto := fifelse(termino == "edad_70a80", "+10 años (70→80)", "Hombre vs mujer")]
+  ed[, enf := corto(nodo)]; o <- ed[efecto == "+10 años (70→80)"][order(exp_re), enf]
+  ed[, enf := factor(enf, levels = unique(c(o, setdiff(ed$enf, o))))]
+  ggplot(ed, aes(exp_re, enf, colour = efecto)) + geom_vline(xintercept = 1, linetype = 2) +
+    geom_errorbarh(aes(xmin = lo, xmax = hi), height = .25, position = position_dodge(.6)) + geom_point(position = position_dodge(.6), size = 2) +
+    scale_x_log10() + scale_colour_manual(values = c("+10 años (70→80)" = pal[["naranja"]], "Hombre vs mujer" = pal[["azul"]]), name = NULL) +
+    labs(x = "OR combinado, escala logarítmica", y = NULL, title = "Efecto de la edad y del sexo sobre la incidencia de cada enfermedad")
+} else cat("Sin resultados combinados de edad y sexo.")
+```
+
+## Tablas 2×2 por arco (sin ajustar)
+
+Comprobación sencilla de los OR del modelo: entre las personas que no tenían la enfermedad de destino, la proporción que la desarrolla en el año siguiente según tengan o no la de origen, por sitio y combinada con Mantel-Haenszel.
+
+```{r tablas-arcos}
+#| fig-height: 7
+at <- rd("meta", "meta_arc_tables.csv")
+if (!is.null(at) && nrow(at)) {
+  at <- at[stats::complete.cases(a1_b1, a1_b0, a0_b1, a0_b0)]
+  at[, orc := (as.numeric(a1_b1) * a0_b0) / (as.numeric(a1_b0) * a0_b1)]
+  mh <- at[, {n <- a1_b1 + a1_b0 + a0_b1 + a0_b0; .(orc = sum(as.numeric(a1_b1) * a0_b0 / n) / sum(as.numeric(a1_b0) * a0_b1 / n))}, by = .(from, to)]
+  at[, arco := paste0(corto(from), " → ", corto(to))]; mh[, arco := paste0(corto(from), " → ", corto(to))]
+  ggplot(at, aes(orc, arco)) + geom_vline(xintercept = 1, linetype = 2) + geom_point(aes(colour = site), size = 2) +
+    geom_point(data = mh, shape = 4, size = 3.5, stroke = 1.2) + scale_x_log10() +
+    labs(x = "OR sin ajustar (cruz = Mantel-Haenszel combinado)", y = NULL, colour = "Sitio", title = "OR crudo por arco y sitio")
+}
+```
+
+# Heterogeneidad entre sitios
+
+## ¿Cuánta y dónde?
+
+```{r het-resumen}
+#| fig-height: 4.5
+if (nrow(inc_ok)) {
+  a <- ggplot(inc_ok, aes(100 * I2)) + geom_histogram(binwidth = 10, boundary = 0, fill = pal["azul"], color = "white") +
+    labs(x = "I² (%)", y = "Arcos", title = "Distribución de I²")
+  b <- ggplot(inc_ok, aes(exp_re, sqrt(tau2))) + geom_point(color = pal["azul"], size = 2) +
+    geom_text_repel(data = inc_ok[sqrt(tau2) >= quantile(sqrt(tau2), .85)], aes(label = arco), size = 2.8, max.overlaps = 20) +
+    scale_x_log10() + labs(x = "OR combinado (log)", y = expression(hat(tau)~"(escala log-OR)"), title = "Heterogeneidad frente a efecto")
+  a + b
+}
+```
+
+## Residuos estandarizados sitio × arco
+
+$z_{i}=(\hat\beta_i-\hat\mu)/\sqrt{s_i^2+\hat\tau^2}$. Un sitio con residuos del mismo signo en muchos arcos sugiere un **efecto sistemático del sitio** (codificación, cobertura); residuos dispersos, heterogeneidad sin patrón.
+
+```{r residuos}
+#| fig-height: 7
+if (nrow(inc_ok) && nsite >= 3) {
+  s <- merge(sc[is.finite(beta) & se > 0 & !is.na(arco), .(arco, site, beta, se)], inc_ok[, .(arco, mu = beta_re, tau2)], by = "arco")
+  s[, z := (beta - mu) / sqrt(se^2 + tau2)]
+  w <- dcast(s, arco ~ site, value.var = "z"); m <- as.matrix(w[, -1]); rownames(m) <- w$arco; m[is.na(m)] <- 0
+  ro <- hclust(dist(m))$order; co <- hclust(dist(t(m)))$order
+  s[, arco := factor(arco, levels = rownames(m)[ro])]; s[, site := factor(site, levels = colnames(m)[co])]
+  lim <- min(4, max(abs(s$z), na.rm = TRUE))
+  ggplot(s, aes(site, arco, fill = pmax(-lim, pmin(lim, z)))) + geom_tile(color = "white") + geom_text(aes(label = sprintf("%.1f", z)), size = 2.6) +
+    scale_fill_gradient2(low = pal["azul"], mid = "white", high = pal["naranja"], limits = c(-lim, lim), name = "z") +
+    labs(x = NULL, y = NULL, title = "Residuos estandarizados (sitio − efecto combinado)", subtitle = "Filas y columnas ordenadas por agrupamiento jerárquico") +
+    theme(panel.grid = element_blank())
+}
+```
+
+```{r outlier-score}
+#| fig-height: 3.5
+if (exists("s") && nrow(s)) {
+  sc2 <- s[, .(`|z| medio` = mean(abs(z)), `sesgo medio (z)` = mean(z), arcos = .N), by = site][order(-`|z| medio`)]
+  ggplot(sc2, aes(reorder(site, `|z| medio`), `|z| medio`, fill = `sesgo medio (z)`)) + geom_col() + coord_flip() +
+    scale_fill_gradient2(low = pal["azul"], mid = "grey90", high = pal["naranja"], name = "Sesgo medio") +
+    labs(x = NULL, y = "|z| medio", title = "¿Qué sitio se aleja más del conjunto?", subtitle = "Si todos rondan 0,8 (|z| esperado en un N(0,1)), no hay un sitio atípico")
+  kable(sc2, digits = 2)
+}
+```
+
+# Sensibilidad y robustez
+
+## REML + Hartung-Knapp frente a DerSimonian-Laird e IC normal
+
+```{r sens-dl}
+#| fig-height: 4.5
+if (nrow(inc_ok)) {
+  a <- ggplot(inc_ok, aes(tau2_dl, tau2)) + geom_abline(linetype = 2, color = "grey50") + geom_point(color = pal["azul"], size = 2) +
+    labs(x = expression(tau^2~"DL"), y = expression(tau^2~"REML"), title = "Varianza entre sitios")
+  inc_ok[, anch := (log(hi) - log(lo)) / (2 * 1.96 * se_re)]
+  b <- ggplot(inc_ok, aes(anch)) + geom_histogram(bins = 20, fill = pal["naranja"], color = "white") + geom_vline(xintercept = 1, linetype = 2) +
+    labs(x = "Anchura IC Hartung-Knapp / IC normal REML", y = "Arcos", title = "Cuánto ensancha Hartung-Knapp el IC")
+  a + b
+}
+```
+
+## Dejar un sitio fuera
+
+```{r loo}
+#| fig-height: 9
+#| results: asis
+if (nrow(inc_ok[!is.na(loo_min)])) {
+  d <- inc_ok[!is.na(loo_min)][order(exp_re)]; d[, arco := factor(arco, levels = arco)]
+  ggplot(d, aes(y = arco)) + geom_linerange(aes(xmin = loo_min, xmax = loo_max), color = pal["naranja"], linewidth = 2, alpha = .5) +
+    geom_point(aes(x = exp_re), color = "grey20", size = 2) + geom_vline(xintercept = 1, linetype = 2) + scale_x_log10() +
+    labs(x = "OR (log)", y = NULL, title = "Rango del OR combinado al excluir cada sitio por turnos",
+         subtitle = "Punto: todos los sitios · barra: mínimo y máximo dejando uno fuera")
+} else cat("Se necesitan al menos k = min_sites + 1 sitios para dejar uno fuera.")
+```
+
+```{r fragiles}
+#| results: asis
+if (nrow(inc_ok[!is.na(loo_min)])) {
+  fr <- inc_ok[(lo > 1 & loo_min < 1) | (hi < 1 & loo_max > 1), .(Arco = arco, OR = round(exp_re, 2), `Sin 1 sitio` = sprintf("%.2f–%.2f", loo_min, loo_max))]
+  if (nrow(fr)) { cat("\n**Resultados frágiles** (significativos con todos los sitios, pero no al excluir uno):\n\n"); kable(fr) }
+  else cat("\nNingún arco significativo cambia de lado al dejar un sitio fuera.\n")
+}
+```
+
+# Síntesis: trayectorias ponderadas por mortalidad
+
+La red consenso con los **OR combinados** como grosor de arco y el **HR combinado de mortalidad** como color de nodo: qué trayectorias de progresión conducen a estados de mayor riesgo de muerte.
+
+```{r sintesis}
+#| fig-height: 9
+if (exists("ok") && nrow(ok) && nrow(inc_ok)) {
+  orm <- inc_ok[, .(from = corto(sub("_t0$", "", termino)), to = corto(nodo), OR = exp_re)]
+  hrm <- hz_ok[, .(name = corto(nodo), HR = exp_re)]
+  ed <- merge(ok[, .(from = corto(dbn_from), to = corto(dbn_to))], orm, by = c("from", "to"), all.x = TRUE)
+  ed[is.na(OR), OR := 1]
+  g <- graph_from_data_frame(ed, directed = TRUE)
+  tg <- as_tbl_graph(g) %>% mutate(HR = hrm$HR[match(name, hrm$name)])
+  set.seed(2)
+  ggraph(tg, layout = "sugiyama") +
+    geom_edge_link(aes(width = log(OR)), arrow = arrow(length = unit(2.5, "mm"), type = "closed"), end_cap = circle(3, "mm"), colour = "grey55", alpha = .8) +
+    geom_node_point(aes(colour = HR), size = 5) + geom_node_text(aes(label = name), repel = TRUE, size = 3) +
+    scale_colour_gradient(low = "#ffeda0", high = "#7f0000", na.value = "grey85", name = "HR de muerte") +
+    scale_edge_width(range = c(.4, 2.2), name = "log OR") + theme_void() + theme(legend.position = "bottom")
+}
+```
+
+# Notas y limitaciones
+
+* **Pocos sitios.** Con $k\approx7$, $\tau^2$ e $I^2$ son descriptivos; los IC de Hartung-Knapp y los intervalos de predicción son la forma prudente de comunicar la incertidumbre.
+* **Estructura impuesta.** Las ORs de incidencia se estiman *dada* la estructura consenso; una estructura mal orientada no se corrige en el meta-análisis. Los arcos *inciertos* quedan fuera.
+* **Heterogeneidad real o artefactual.** Una $I^2$ alta puede deberse a codificación o cobertura distintas (p. ej. qué se registra como «anemia» en cada sistema). Los mapas de prevalencia y de residuos orientan, pero no lo demuestran.
+* **Asociación, no causalidad.** Los arcos describen precedencia temporal y asociación condicionada; los HR están ajustados por edad y sexo, no por factores no medidos.
+* **Muestras aleatorias.** Los sitios con tope de personas pesan menos; sus recuentos descriptivos reescalados son estimaciones.
+* **Meta-regresión.** Con 7 sitios tiene muy poca potencia; no se hace. La sensibilidad dejando uno fuera es el análisis de robustez principal.
+
+# Reproducibilidad
+
+```{r repro}
+cat("Carpeta del central:", cdir, "\n")
+if (!is.null(man$fingerprint)) cat("Huella de configuración:", man$fingerprint, "\n")
+if (!is.null(man$package_version)) cat("loxofed:", man$package_version, "\n")
+sessionInfo()
+```

@@ -1,0 +1,16 @@
+Package: loxofed
+Type: Package
+Title: Federated Dynamic Bayesian Network and Mortality Analysis for LOXO
+Version: 0.7.6
+Authors@R: person("Julian", "Librero", role = c("aut", "cre"), email = "maintainer@example.org")
+Description: Site-side and central tools to reproduce the LOXO multimorbidity
+    analysis (two-layer 2-TBN of disease progression plus a discrete-time
+    cloglog mortality hazard) in a federated way. Sites run the analysis on
+    the common data model (persons + diseases tables) and export only
+    aggregated, small-cell-suppressed results; a central node builds a
+    consensus network and meta-analyses the coefficients.
+License: Unlimited
+Depends: R (>= 4.1.0)
+Imports: data.table, bnlearn, yaml, jsonlite, digest, splines, stats, utils, tools
+Suggests: testthat (>= 3.0.0), metafor, knitr, ggraph, tidygraph, patchwork, ggrepel, visNetwork, DT, htmltools, jsonlite
+Encoding: UTF-8

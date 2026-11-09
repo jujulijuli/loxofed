@@ -1,0 +1,47 @@
+# Configuracion de un sitio. Copiar a config.yml y editar SOLO la seccion "propio del sitio".
+# La seccion "comun" debe ser IDENTICA en los 7 sitios: el nodo central compara su huella y
+# se niega a combinar sitios con configuraciones distintas.
+
+# ---------------------------------------------------------------- propio del sitio
+site_id: NAV                       # identificador corto y unico (NAV, ARA, AND, ...)
+paths:                             # rutas DENTRO del contenedor (ver docker/run_site.sh)
+  pacientes: /data/pacientes.csv
+  enfermedades: /data/enfermedades.csv
+  output_dir: /output
+cdm:
+  sep: "|"
+  cols:                            # nombres de columna del CDM de este sitio
+    id: Id_pac
+    birth: F_Nac                   # ANIO de nacimiento (4 digitos) o fecha; se usa solo el anio
+    sex: Sexo
+    death: F_Exitus                # YYYY-MM-DD, YYYY-MM o YYYY; vacio si sigue viva
+    baja: F_Baja                   # fecha de baja administrativa (columna del modelo comun; puede ir vacia). `~` = el sitio no tiene la columna
+    dx_date: F_EnfC                # YYYY-MM-DD (ideal), YYYY-MM o YYYY
+    dx_code: EnfC
+  sex_map:                         # modelo de datos comun: Sexo = H (hombre) / M (mujer); no hace falta tocarlo
+    female: [M, m, Mujer, mujer]
+    male:   [H, h, Hombre, hombre]
+structure:
+  seed: 2026                       # la semilla puede diferir entre sitios
+
+# ---------------------------------------------------------------- comun (identico en todos)
+cohort:
+  year_first: 2012
+  year_last: 2022
+  age_min: 60
+  age_max: ~                       # sin limite superior
+  min_chronic: 2
+  exclude_baja_baseline: true
+  sample_n: ~                      # SOLO del sitio (no entra en la huella): tope de personas, ~ = sin tope
+  sample_seed: 2026
+model:
+  prev_min: 0.01
+  min_events_node: 100
+  min_events_hazard: 20
+  age_knots: [70, 80, 90]          # nudos FIJOS del spline de edad (comparabilidad entre sitios)
+  age_boundary: [60, 105]
+consensus:
+  threshold: 0.60
+  min_site_frac: 0.5
+disclosure:
+  min_cell: 10
